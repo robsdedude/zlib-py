@@ -92,12 +92,13 @@ HW_ACCELERATED = False  # zlib-rs is deterministic; CPython's HW guard is moot.
 ZLIB_RUNTIME_VERSION_TUPLE = tuple(
     int(p) for p in zlib.ZLIB_RUNTIME_VERSION.split(".")[:4] if p.isdigit()
 )
-# CPython's test module defines these decorators based on whether the C
-# extension exposes Compress.copy / Decompress.copy. We always lack them
-# today (deviation #11 in THIRD_PARTY.md), so every decorated test is
-# expected to fail.
-requires_Compress_copy = unittest.expectedFailure
-requires_Decompress_copy = unittest.expectedFailure
+
+requires_Compress_copy = unittest.skipUnless(
+        hasattr(zlib.compressobj(), "copy"),
+        'requires Compress.copy()')
+requires_Decompress_copy = unittest.skipUnless(
+        hasattr(zlib.decompressobj(), "copy"),
+        'requires Decompress.copy()')
 
 
 class CompressObjectTestCase(unittest.TestCase):

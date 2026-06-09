@@ -27,10 +27,9 @@ class CustomInt:
         return 100
 
 
-# CPython's test module defines this decorator based on whether the C
-# extension exposes Decompress.copy. We lack it today (deviation #11 in
-# THIRD_PARTY.md), so every decorated test is expected to fail.
-requires_Decompress_copy = unittest.expectedFailure
+requires_Decompress_copy = unittest.skipUnless(
+        hasattr(zlib.decompressobj(), "copy"),
+        'requires Decompress.copy()')
 
 
 class DecompressObjectTestCase(unittest.TestCase):

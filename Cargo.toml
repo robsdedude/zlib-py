@@ -11,4 +11,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.27.0", features = ["abi3-py311"] }
-zlib-rs = "0.6.3"
+zlib-rs = { path = "vendor/zlib-rs/zlib-rs" }

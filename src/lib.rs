@@ -10,10 +10,14 @@ use std::sync::Mutex;
 
 use pyo3::buffer::PyBuffer;
 use pyo3::create_exception;
-use pyo3::exceptions::{PyBufferError, PyEOFError, PyException, PyNotImplementedError, PyValueError};
+use pyo3::exceptions::{PyBufferError, PyEOFError, PyException, PyMemoryError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
-use zlib_rs::{Deflate, DeflateFlush, Inflate, InflateFlush, Status};
+use zlib_rs::{
+    Deflate, DeflateCloneError, DeflateFlush, Inflate, InflateCloneError, InflateFlush, Status,
+};
+
+const _BUF_CAPACITY: usize = 32768;
 
 /// Validate wbits for one-shot compress / streaming compressobj.
 /// Accepts -15..=-8 (raw), 8..=15 (zlib), 25..=31 (gzip).
@@ -273,7 +277,7 @@ fn compressobj(
     Ok(Compress {
         state: Mutex::new(CompressState {
             deflate: Some(deflate),
-            buf: Vec::with_capacity(32768),
+            buf: Vec::with_capacity(_BUF_CAPACITY),
         }),
     })
 }
@@ -317,7 +321,7 @@ fn decompressobj(wbits: i32, zdict: Option<&Bound<'_, PyAny>>) -> PyResult<Decom
     };
     let mut state = DecompressState {
         inflate,
-        buf: Vec::with_capacity(32768),
+        buf: Vec::with_capacity(_BUF_CAPACITY),
         unused_data: Vec::new(),
         unconsumed_tail: Vec::new(),
         eof: false,
@@ -416,8 +420,8 @@ impl Compress {
             ));
         };
 
-        if buf.len() < 32768 {
-            buf.resize(32768, 0);
+        if buf.len() < _BUF_CAPACITY {
+            buf.resize(_BUF_CAPACITY, 0);
         }
 
         let mut output: Vec<u8> = Vec::with_capacity(4096);
@@ -444,10 +448,34 @@ impl Compress {
         Ok(PyBytes::new(py, &output).unbind())
     }
 
-    fn copy(&self) -> PyResult<Compress> {
-        Err(PyNotImplementedError::new_err(
-            "Compress.copy not yet supported — needs libz-rs-sys deflateCopy",
-        ))
+    fn copy(&self) -> PyResult<Self> {
+        let guard = self.state.lock().unwrap();
+        let CompressState { deflate, buf } = &*guard;
+        let Some(deflate) = deflate else {
+            return Err(PyValueError::new_err("Inconsistent stream state"));
+        };
+        let deflate = match deflate.try_clone() {
+            Ok(deflate) => deflate,
+            Err(DeflateCloneError::MemError) => {
+                return Err(PyMemoryError::new_err(
+                    "Can't allocate memory for compression object",
+                ));
+            }
+        };
+        Ok(Self {
+            state: Mutex::new(CompressState {
+                deflate: Some(deflate),
+                buf: Vec::with_capacity(_BUF_CAPACITY),
+            }),
+        })
+    }
+
+    fn __copy__(&self) -> PyResult<Self> {
+        self.copy()
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Self> {
+        self.copy()
     }
 }
 
@@ -655,10 +683,51 @@ impl Decompress {
         Ok(PyBytes::new(py, &output).unbind())
     }
 
-    fn copy(&self) -> PyResult<Decompress> {
-        Err(PyNotImplementedError::new_err(
-            "Decompress.copy not yet supported — needs libz-rs-sys inflateCopy",
-        ))
+    fn copy(&self) -> PyResult<Self> {
+        let guard = self.state.lock().unwrap();
+        let DecompressState {
+            inflate,
+            buf,
+            unused_data,
+            unconsumed_tail,
+            eof,
+            needs_input,
+            zdict,
+        } = &*guard;
+        if *eof {
+            return Err(PyValueError::new_err("Inconsistent stream state"));
+        }
+        let inflate = match inflate.try_clone() {
+            Ok(inflate) => inflate,
+            Err(InflateCloneError::MemError) => {
+                return Err(PyMemoryError::new_err(
+                    "Can't allocate memory for compression object",
+                ));
+            }
+            Err(InflateCloneError::StreamError) => {
+                return Err(PyValueError::new_err("Inconsistent stream state"));
+            }
+        };
+        let state = DecompressState {
+            inflate,
+            buf: Vec::with_capacity(_BUF_CAPACITY),
+            unused_data: unused_data.clone(),
+            unconsumed_tail: unconsumed_tail.clone(),
+            eof: *eof,
+            needs_input: *needs_input,
+            zdict: zdict.clone(),
+        };
+        Ok(Self {
+            state: Mutex::new(state),
+        })
+    }
+
+    fn __copy__(&self) -> PyResult<Self> {
+        self.copy()
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Self> {
+        self.copy()
     }
 
     #[getter]
@@ -757,7 +826,7 @@ impl ZlibDecompressor {
             state: Mutex::new(ZlibDecompressorState {
                 inflate,
                 input_buffer: Vec::new(),
-                output_scratch: Vec::with_capacity(32768),
+                output_scratch: Vec::with_capacity(_BUF_CAPACITY),
                 unused_data: Vec::new(),
                 eof: false,
                 needs_input: true,
@@ -791,9 +860,8 @@ impl ZlibDecompressor {
 
         state.input_buffer.extend_from_slice(new_input);
 
-        const SCRATCH: usize = 32768;
-        if state.output_scratch.len() < SCRATCH {
-            state.output_scratch.resize(SCRATCH, 0);
+        if state.output_scratch.len() < _BUF_CAPACITY {
+            state.output_scratch.resize(_BUF_CAPACITY, 0);
         }
 
         let mut output: Vec<u8> = Vec::new();
